@@ -82,6 +82,7 @@ import {
     flushEphemeralStoppingStrings,
     context_presets,
     resetMovableStyles,
+    forceCharacterEditorTokenize,
 } from './scripts/power-user.js';
 
 import {
@@ -153,7 +154,7 @@ import {
     ensureImageFormatSupported,
 } from './scripts/utils.js';
 
-import { ModuleWorkerWrapper, doDailyExtensionUpdatesCheck, extension_settings, getContext, loadExtensionSettings, renderExtensionTemplate, runGenerationInterceptors, saveMetadataDebounced, writeExtensionField } from './scripts/extensions.js';
+import { ModuleWorkerWrapper, doDailyExtensionUpdatesCheck, extension_settings, getContext, loadExtensionSettings, renderExtensionTemplate, renderExtensionTemplateAsync, runGenerationInterceptors, saveMetadataDebounced, writeExtensionField } from './scripts/extensions.js';
 import { COMMENT_NAME_DEFAULT, executeSlashCommands, getSlashCommandsHelp, processChatSlashCommands, registerSlashCommand } from './scripts/slash-commands.js';
 import {
     tag_map,
@@ -201,8 +202,8 @@ import {
     instruct_presets,
     selectContextPreset,
 } from './scripts/instruct-mode.js';
-import { applyLocale, initLocales } from './scripts/i18n.js';
-import { getFriendlyTokenizerName, getTokenCount, getTokenizerModel, initTokenizers, saveTokenCache } from './scripts/tokenizers.js';
+import { initLocales } from './scripts/i18n.js';
+import { getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, getTokenizerModel, initTokenizers, saveTokenCache } from './scripts/tokenizers.js';
 import { createPersona, initPersonas, selectCurrentPersona, setPersonaDescription, updatePersonaNameIfExists } from './scripts/personas.js';
 import { getBackgrounds, initBackgrounds, loadBackgroundSettings, background_settings } from './scripts/backgrounds.js';
 import { hideLoader, showLoader } from './scripts/loader.js';
@@ -211,6 +212,10 @@ import { loadMancerModels, loadOllamaModels, loadTogetherAIModels, loadInfermati
 import { appendFileContent, hasPendingFileAttachment, populateFileAttachment, decodeStyleTags, encodeStyleTags, isExternalMediaAllowed, getCurrentEntityId } from './scripts/chats.js';
 import { initPresetManager } from './scripts/preset-manager.js';
 import { evaluateMacros } from './scripts/macros.js';
+import { currentUser, setUserControls } from './scripts/user.js';
+import { callGenericPopup } from './scripts/popup.js';
+import { renderTemplate, renderTemplateAsync } from './scripts/templates.js';
+import { ScraperManager } from './scripts/scrapers.js';
 
 //exporting functions and vars for mods
 export {
@@ -285,6 +290,7 @@ export {
     printCharactersDebounced,
     isOdd,
     countOccurrences,
+    renderTemplate,
 };
 
 showLoader();
@@ -442,6 +448,7 @@ export const event_types = {
     CHARACTER_DELETED: 'characterDeleted',
     CHARACTER_DUPLICATED: 'character_duplicated',
     SMOOTH_STREAM_TOKEN_RECEIVED: 'smooth_stream_token_received',
+    FILE_ATTACHMENT_DELETED: 'file_attachment_deleted',
 };
 
 export const eventSource = new EventEmitter();
@@ -574,14 +581,14 @@ export const MAX_INJECTION_DEPTH = 1000;
 
 let system_messages = {};
 
-function getSystemMessages() {
+async function getSystemMessages() {
     system_messages = {
         help: {
             name: systemUserName,
             force_avatar: system_avatar,
             is_user: false,
             is_system: true,
-            mes: renderTemplate('help'),
+            mes: await renderTemplateAsync('help'),
         },
         slash_commands: {
             name: systemUserName,
@@ -595,21 +602,21 @@ function getSystemMessages() {
             force_avatar: system_avatar,
             is_user: false,
             is_system: true,
-            mes: renderTemplate('hotkeys'),
+            mes: await renderTemplateAsync('hotkeys'),
         },
         formatting: {
             name: systemUserName,
             force_avatar: system_avatar,
             is_user: false,
             is_system: true,
-            mes: renderTemplate('formatting'),
+            mes: await renderTemplateAsync('formatting'),
         },
         macros: {
             name: systemUserName,
             force_avatar: system_avatar,
             is_user: false,
             is_system: true,
-            mes: renderTemplate('macros'),
+            mes: await renderTemplateAsync('macros'),
         },
         welcome:
         {
@@ -617,7 +624,7 @@ function getSystemMessages() {
             force_avatar: system_avatar,
             is_user: false,
             is_system: true,
-            mes: renderTemplate('welcome'),
+            mes: await renderTemplateAsync('welcome'),
         },
         group: {
             name: systemUserName,
@@ -662,60 +669,16 @@ function getSystemMessages() {
 registerPromptManagerMigration();
 
 $(document).ajaxError(function myErrorHandler(_, xhr) {
+    // Cohee: CSRF doesn't error out in multiple tabs anymore, so this is unnecessary
+    /*
     if (xhr.status == 403) {
         toastr.warning(
             'doubleCsrf errors in console are NORMAL in this case. If you want to run ST in multiple tabs, start the server with --disableCsrf option.',
             'Looks like you\'ve opened SillyTavern in another browser tab',
             { timeOut: 0, extendedTimeOut: 0, preventDuplicates: true },
         );
-    }
+    } */
 });
-
-/**
- * Loads a URL content using XMLHttpRequest synchronously.
- * @param {string} url URL to load synchronously
- * @returns {string} Response text
- */
-function getUrlSync(url) {
-    console.debug('Loading URL synchronously', url);
-    const request = new XMLHttpRequest();
-    request.open('GET', url, false); // `false` makes the request synchronous
-    request.send();
-
-    if (request.status >= 200 && request.status < 300) {
-        return request.responseText;
-    }
-
-    throw new Error(`Error loading ${url}: ${request.status} ${request.statusText}`);
-}
-
-const templateCache = new Map();
-
-export function renderTemplate(templateId, templateData = {}, sanitize = true, localize = true, fullPath = false) {
-    try {
-        const pathToTemplate = fullPath ? templateId : `/scripts/templates/${templateId}.html`;
-        let template = templateCache.get(pathToTemplate);
-        if (!template) {
-            const templateContent = getUrlSync(pathToTemplate);
-            template = Handlebars.compile(templateContent);
-            templateCache.set(pathToTemplate, template);
-        }
-        let result = template(templateData);
-
-        if (sanitize) {
-            result = DOMPurify.sanitize(result);
-        }
-
-        if (localize) {
-            result = applyLocale(result);
-        }
-
-        return result;
-    } catch (err) {
-        console.error('Error rendering template', templateId, templateData, err);
-        toastr.error('Check the DevTools console for more information.', 'Error rendering template');
-    }
-}
 
 async function getClientVersion() {
     try {
@@ -780,7 +743,7 @@ function getCurrentChatId() {
     if (selected_group) {
         return groups.find(x => x.id == selected_group)?.chat_id;
     }
-    else if (this_chid) {
+    else if (this_chid !== undefined) {
         return characters[this_chid]?.chat;
     }
 }
@@ -821,7 +784,7 @@ let create_save = {
 //animation right menu
 export const ANIMATION_DURATION_DEFAULT = 125;
 export let animation_duration = ANIMATION_DURATION_DEFAULT;
-let animation_easing = 'ease-in-out';
+export let animation_easing = 'ease-in-out';
 let popup_type = '';
 let chat_file_for_del = '';
 let online_status = 'no_connection';
@@ -897,7 +860,7 @@ async function firstLoadInit() {
         throw new Error('Initialization failed');
     }
 
-    getSystemMessages();
+    await getSystemMessages();
     sendSystemMessage(system_message_types.WELCOME);
     await getClientVersion();
     await readSecretState();
@@ -1203,7 +1166,7 @@ export function resultCheckStatus() {
 }
 
 export async function selectCharacterById(id) {
-    if (characters[id] == undefined) {
+    if (characters[id] === undefined) {
         return;
     }
 
@@ -1543,7 +1506,7 @@ function getCharacterSource(chId = this_chid) {
 }
 
 async function getCharacters() {
-    var response = await fetch('/api/characters/all', {
+    const response = await fetch('/api/characters/all', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({
@@ -1551,11 +1514,9 @@ async function getCharacters() {
         }),
     });
     if (response.ok === true) {
-        var getData = ''; //RossAscends: reset to force array to update to account for deleted character.
-        getData = await response.json();
-        const load_ch_count = Object.getOwnPropertyNames(getData);
-        for (var i = 0; i < load_ch_count.length; i++) {
-            characters[i] = [];
+        characters.splice(0, characters.length);
+        const getData = await response.json();
+        for (let i = 0; i < getData.length; i++) {
             characters[i] = getData[i];
             characters[i]['name'] = DOMPurify.sanitize(characters[i]['name']);
 
@@ -1566,7 +1527,7 @@ async function getCharacters() {
 
             characters[i]['chat'] = String(characters[i]['chat']);
         }
-        if (this_chid != undefined && this_chid != 'invalid-safety-id') {
+        if (this_chid !== undefined) {
             $('#avatar_url_pole').val(characters[this_chid].avatar);
         }
 
@@ -1719,11 +1680,12 @@ export async function reloadCurrentChat() {
     if (selected_group) {
         await getGroupChat(selected_group, true);
     }
-    else if (this_chid) {
+    else if (this_chid !== undefined) {
         await getChat();
     }
     else {
         resetChatState();
+        await getCharacters();
         await printMessages();
         await eventSource.emit(event_types.CHAT_CHANGED, getCurrentChatId());
     }
@@ -1826,7 +1788,7 @@ function messageFormatting(mes, ch_name, isSystem, isUser, messageId) {
         mes = mes.replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }
 
-    if ((this_chid === undefined || this_chid === 'invalid-safety-id') && !selected_group) {
+    if (this_chid === undefined && !selected_group) {
         mes = mes
             .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
             .replace(/\n/g, '<br/>');
@@ -2083,7 +2045,7 @@ function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll = true
     if (!mes['is_user']) {
         if (mes.force_avatar) {
             avatarImg = mes.force_avatar;
-        } else if (this_chid === undefined || this_chid === 'invalid-safety-id') {
+        } else if (this_chid === undefined) {
             avatarImg = system_avatar;
         } else {
             if (characters[this_chid].avatar != 'none') {
@@ -2484,9 +2446,14 @@ function sendSystemMessage(type, text, extra = {}) {
     is_send_press = false;
 }
 
+/**
+ * Extracts the contents of bias macros from a message.
+ * @param {string} message Message text
+ * @returns {string} Message bias extracted from the message (or an empty string if not found)
+ */
 export function extractMessageBias(message) {
     if (!message) {
-        return null;
+        return '';
     }
 
     try {
@@ -3107,14 +3074,14 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
 
         if (interruptedByCommand) {
             //$("#send_textarea").val('').trigger('input');
-            unblockGeneration();
+            unblockGeneration(type);
             return Promise.resolve();
         }
     }
 
     if (main_api == 'kobold' && kai_settings.streaming_kobold && !kai_flags.can_use_streaming) {
         toastr.error('Streaming is enabled, but the version of Kobold used does not support token streaming.', undefined, { timeOut: 10000, preventDuplicates: true });
-        unblockGeneration();
+        unblockGeneration(type);
         return Promise.resolve();
     }
 
@@ -3123,12 +3090,12 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
         textgen_settings.legacy_api &&
         (textgen_settings.type === OOBA || textgen_settings.type === APHRODITE)) {
         toastr.error('Streaming is not supported for the Legacy API. Update Ooba and use new API to enable streaming.', undefined, { timeOut: 10000, preventDuplicates: true });
-        unblockGeneration();
+        unblockGeneration(type);
         return Promise.resolve();
     }
 
     if (isHordeGenerationNotAllowed()) {
-        unblockGeneration();
+        unblockGeneration(type);
         return Promise.resolve();
     }
 
@@ -3164,7 +3131,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             setCharacterName('');
         } else {
             console.log('No enabled members found');
-            unblockGeneration();
+            unblockGeneration(type);
             return Promise.resolve();
         }
     }
@@ -3176,12 +3143,12 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
         quiet_prompt = main_api == 'novel' && !quietToLoud ? adjustNovelInstructionPrompt(quiet_prompt) : quiet_prompt;
     }
 
-    const isChatValid = online_status != 'no_connection' && this_chid != undefined && this_chid !== 'invalid-safety-id';
+    const isChatValid = online_status !== 'no_connection' && this_chid !== undefined;
 
     // We can't do anything because we're not in a chat right now. (Unless it's a dry run, in which case we need to
     // assemble the prompt so we can count its tokens regardless of whether a chat is active.)
     if (!dryRun && !isChatValid) {
-        if (this_chid === undefined || this_chid === 'invalid-safety-id') {
+        if (this_chid === undefined) {
             toastr.warning('Сharacter is not selected');
         }
         is_send_press = false;
@@ -3338,7 +3305,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
 
         if (aborted) {
             console.debug('Generation aborted by extension interceptors');
-            unblockGeneration();
+            unblockGeneration(type);
             return Promise.resolve();
         }
     } else {
@@ -3352,7 +3319,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             adjustedParams = await adjustHordeGenerationParams(max_context, amount_gen);
         }
         catch {
-            unblockGeneration();
+            unblockGeneration(type);
             return Promise.resolve();
         }
         if (horde_settings.auto_adjust_context_length) {
@@ -3510,7 +3477,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
     let chatString = '';
     let cyclePrompt = '';
 
-    function getMessagesTokenCount() {
+    async function getMessagesTokenCount() {
         const encodeString = [
             beforeScenarioAnchor,
             storyString,
@@ -3521,7 +3488,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             cyclePrompt,
             userAlignmentMessage,
         ].join('').replace(/\r/gm, '');
-        return getTokenCount(encodeString, power_user.token_padding);
+        return getTokenCountAsync(encodeString, power_user.token_padding);
     }
 
     // Force pinned examples into the context
@@ -3537,7 +3504,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
 
     // Collect enough messages to fill the context
     let arrMes = new Array(chat2.length);
-    let tokenCount = getMessagesTokenCount();
+    let tokenCount = await getMessagesTokenCount();
     let lastAddedIndex = -1;
 
     // Pre-allocate all injections first.
@@ -3549,7 +3516,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             continue;
         }
 
-        tokenCount += getTokenCount(item.replace(/\r/gm, ''));
+        tokenCount += await getTokenCountAsync(item.replace(/\r/gm, ''));
         chatString = item + chatString;
         if (tokenCount < this_max_context) {
             arrMes[index] = item;
@@ -3579,7 +3546,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             continue;
         }
 
-        tokenCount += getTokenCount(item.replace(/\r/gm, ''));
+        tokenCount += await getTokenCountAsync(item.replace(/\r/gm, ''));
         chatString = item + chatString;
         if (tokenCount < this_max_context) {
             arrMes[i] = item;
@@ -3595,7 +3562,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
     // Add user alignment message if last message is not a user message
     const stoppedAtUser = userMessageIndices.includes(lastAddedIndex);
     if (addUserAlignment && !stoppedAtUser) {
-        tokenCount += getTokenCount(userAlignmentMessage.replace(/\r/gm, ''));
+        tokenCount += await getTokenCountAsync(userAlignmentMessage.replace(/\r/gm, ''));
         chatString = userAlignmentMessage + chatString;
         arrMes.push(userAlignmentMessage);
         injectedIndices.push(arrMes.length - 1);
@@ -3621,11 +3588,11 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
     }
 
     // Estimate how many unpinned example messages fit in the context
-    tokenCount = getMessagesTokenCount();
+    tokenCount = await getMessagesTokenCount();
     let count_exm_add = 0;
     if (!power_user.pin_examples) {
         for (let example of mesExamplesArray) {
-            tokenCount += getTokenCount(example.replace(/\r/gm, ''));
+            tokenCount += await getTokenCountAsync(example.replace(/\r/gm, ''));
             examplesString += example;
             if (tokenCount < this_max_context) {
                 count_exm_add++;
@@ -3780,7 +3747,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
         return promptCache;
     }
 
-    function checkPromptSize() {
+    async function checkPromptSize() {
         console.debug('---checking Prompt size');
         setPromptString();
         const prompt = [
@@ -3793,15 +3760,15 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             generatedPromptCache,
             quiet_prompt,
         ].join('').replace(/\r/gm, '');
-        let thisPromptContextSize = getTokenCount(prompt, power_user.token_padding);
+        let thisPromptContextSize = await getTokenCountAsync(prompt, power_user.token_padding);
 
         if (thisPromptContextSize > this_max_context) {        //if the prepared prompt is larger than the max context size...
             if (count_exm_add > 0) {                            // ..and we have example mesages..
                 count_exm_add--;                            // remove the example messages...
-                checkPromptSize();                            // and try agin...
+                await checkPromptSize();                            // and try agin...
             } else if (mesSend.length > 0) {                    // if the chat history is longer than 0
                 mesSend.shift();                            // remove the first (oldest) chat entry..
-                checkPromptSize();                            // and check size again..
+                await checkPromptSize();                            // and check size again..
             } else {
                 //end
                 console.debug(`---mesSend.length = ${mesSend.length}`);
@@ -3811,7 +3778,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
 
     if (generatedPromptCache.length > 0 && main_api !== 'openai') {
         console.debug('---Generated Prompt Cache length: ' + generatedPromptCache.length);
-        checkPromptSize();
+        await checkPromptSize();
     } else {
         console.debug('---calling setPromptString ' + generatedPromptCache.length);
         setPromptString();
@@ -4026,7 +3993,8 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
             ...thisPromptBits[currentArrayEntry],
             rawPrompt: generate_data.prompt || generate_data.input,
             mesId: getNextMessageId(type),
-            allAnchors: '',
+            allAnchors: getAllExtensionPrompts(),
+            chatInjects: injectedIndices?.map(index => arrMes[arrMes.length - index - 1])?.join('') || '',
             summarizeString: (extension_prompts['1_memory']?.value || ''),
             authorsNoteString: (extension_prompts['2_floating_prompt']?.value || ''),
             smartContextString: (extension_prompts['chromadb']?.value || ''),
@@ -4138,7 +4106,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
                 await eventSource.emit(event_types.IMPERSONATE_READY, getMessage);
             }
             else if (type == 'quiet') {
-                unblockGeneration();
+                unblockGeneration(type);
                 return getMessage;
             }
             else {
@@ -4206,7 +4174,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
 
         console.debug('/api/chats/save called by /Generate');
         await saveChatConditional();
-        unblockGeneration();
+        unblockGeneration(type);
         streamingProcessor = null;
 
         if (type !== 'quiet') {
@@ -4224,7 +4192,7 @@ async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, qu
 
         generatedPromptCache = '';
 
-        unblockGeneration();
+        unblockGeneration(type);
         console.log(exception);
         streamingProcessor = null;
         throw exception;
@@ -4294,7 +4262,16 @@ function flushWIDepthInjections() {
     }
 }
 
-function unblockGeneration() {
+/**
+ * Unblocks the UI after a generation is complete.
+ * @param {string} [type] Generation type (optional)
+ */
+function unblockGeneration(type) {
+    // Don't unblock if a parallel stream is still running
+    if (type === 'quiet' && streamingProcessor && !streamingProcessor.isFinished) {
+        return;
+    }
+
     is_send_press = false;
     activateSendButtons();
     showSwipeButtons();
@@ -4473,7 +4450,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
     };
 
     if (power_user.message_token_count_enabled) {
-        message.extra.token_count = getTokenCount(message.mes, 0);
+        message.extra.token_count = await getTokenCountAsync(message.mes, 0);
     }
 
     // Lock user avatar to a persona.
@@ -4573,7 +4550,7 @@ function addChatsPreamble(mesSendString) {
 
 function addChatsSeparator(mesSendString) {
     if (power_user.context.chat_start) {
-        return substituteParams(power_user.context.chat_start) + '\n' + mesSendString;
+        return substituteParams(power_user.context.chat_start + '\n') + mesSendString;
     }
 
     else {
@@ -4612,7 +4589,7 @@ async function DupeChar() {
     }
 }
 
-function promptItemize(itemizedPrompts, requestedMesId) {
+async function promptItemize(itemizedPrompts, requestedMesId) {
     console.log('PROMPT ITEMIZE ENTERED');
     var incomingMesId = Number(requestedMesId);
     console.debug(`looking for MesId ${incomingMesId}`);
@@ -4636,21 +4613,26 @@ function promptItemize(itemizedPrompts, requestedMesId) {
     }
 
     const params = {
-        charDescriptionTokens: getTokenCount(itemizedPrompts[thisPromptSet].charDescription),
-        charPersonalityTokens: getTokenCount(itemizedPrompts[thisPromptSet].charPersonality),
-        scenarioTextTokens: getTokenCount(itemizedPrompts[thisPromptSet].scenarioText),
-        userPersonaStringTokens: getTokenCount(itemizedPrompts[thisPromptSet].userPersona),
-        worldInfoStringTokens: getTokenCount(itemizedPrompts[thisPromptSet].worldInfoString),
-        allAnchorsTokens: getTokenCount(itemizedPrompts[thisPromptSet].allAnchors),
-        summarizeStringTokens: getTokenCount(itemizedPrompts[thisPromptSet].summarizeString),
-        authorsNoteStringTokens: getTokenCount(itemizedPrompts[thisPromptSet].authorsNoteString),
-        smartContextStringTokens: getTokenCount(itemizedPrompts[thisPromptSet].smartContextString),
-        beforeScenarioAnchorTokens: getTokenCount(itemizedPrompts[thisPromptSet].beforeScenarioAnchor),
-        afterScenarioAnchorTokens: getTokenCount(itemizedPrompts[thisPromptSet].afterScenarioAnchor),
-        zeroDepthAnchorTokens: getTokenCount(itemizedPrompts[thisPromptSet].zeroDepthAnchor), // TODO: unused
+        charDescriptionTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].charDescription),
+        charPersonalityTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].charPersonality),
+        scenarioTextTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].scenarioText),
+        userPersonaStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].userPersona),
+        worldInfoStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].worldInfoString),
+        allAnchorsTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].allAnchors),
+        summarizeStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].summarizeString),
+        authorsNoteStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].authorsNoteString),
+        smartContextStringTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].smartContextString),
+        beforeScenarioAnchorTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].beforeScenarioAnchor),
+        afterScenarioAnchorTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].afterScenarioAnchor),
+        zeroDepthAnchorTokens: await getTokenCountAsync(itemizedPrompts[thisPromptSet].zeroDepthAnchor), // TODO: unused
         thisPrompt_padding: itemizedPrompts[thisPromptSet].padding,
         this_main_api: itemizedPrompts[thisPromptSet].main_api,
+        chatInjects: await getTokenCountAsync(itemizedPrompts[thisPromptSet].chatInjects),
     };
+
+    if (params.chatInjects) {
+        params.ActualChatHistoryTokens = params.ActualChatHistoryTokens - params.chatInjects;
+    }
 
     if (params.this_main_api == 'openai') {
         //for OAI API
@@ -4699,13 +4681,13 @@ function promptItemize(itemizedPrompts, requestedMesId) {
     } else {
         //for non-OAI APIs
         //console.log('-- Counting non-OAI Tokens');
-        params.finalPromptTokens = getTokenCount(itemizedPrompts[thisPromptSet].finalPrompt);
-        params.storyStringTokens = getTokenCount(itemizedPrompts[thisPromptSet].storyString) - params.worldInfoStringTokens;
-        params.examplesStringTokens = getTokenCount(itemizedPrompts[thisPromptSet].examplesString);
-        params.mesSendStringTokens = getTokenCount(itemizedPrompts[thisPromptSet].mesSendString);
+        params.finalPromptTokens = await getTokenCountAsync(itemizedPrompts[thisPromptSet].finalPrompt);
+        params.storyStringTokens = await getTokenCountAsync(itemizedPrompts[thisPromptSet].storyString) - params.worldInfoStringTokens;
+        params.examplesStringTokens = await getTokenCountAsync(itemizedPrompts[thisPromptSet].examplesString);
+        params.mesSendStringTokens = await getTokenCountAsync(itemizedPrompts[thisPromptSet].mesSendString);
         params.ActualChatHistoryTokens = params.mesSendStringTokens - (params.allAnchorsTokens - (params.beforeScenarioAnchorTokens + params.afterScenarioAnchorTokens)) + power_user.token_padding;
-        params.instructionTokens = getTokenCount(itemizedPrompts[thisPromptSet].instruction);
-        params.promptBiasTokens = getTokenCount(itemizedPrompts[thisPromptSet].promptBias);
+        params.instructionTokens = await getTokenCountAsync(itemizedPrompts[thisPromptSet].instruction);
+        params.promptBiasTokens = await getTokenCountAsync(itemizedPrompts[thisPromptSet].promptBias);
 
         params.totalTokensInPrompt =
             params.storyStringTokens +     //chardefs total
@@ -4730,10 +4712,12 @@ function promptItemize(itemizedPrompts, requestedMesId) {
     }
 
     if (params.this_main_api == 'openai') {
-        callPopup(renderTemplate('itemizationChat', params), 'text');
+        const template = await renderTemplateAsync('itemizationChat', params);
+        callPopup(template, 'text');
 
     } else {
-        callPopup(renderTemplate('itemizationText', params), 'text');
+        const template = await renderTemplateAsync('itemizationText', params);
+        callPopup(template, 'text');
     }
 }
 
@@ -5106,7 +5090,7 @@ async function saveReply(type, getMessage, fromStreaming, title, swipes) {
             chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
             chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
             if (power_user.message_token_count_enabled) {
-                chat[chat.length - 1]['extra']['token_count'] = getTokenCount(chat[chat.length - 1]['mes'], 0);
+                chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(chat[chat.length - 1]['mes'], 0);
             }
             const chat_id = (chat.length - 1);
             await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id);
@@ -5126,7 +5110,7 @@ async function saveReply(type, getMessage, fromStreaming, title, swipes) {
         chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
         chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
         if (power_user.message_token_count_enabled) {
-            chat[chat.length - 1]['extra']['token_count'] = getTokenCount(chat[chat.length - 1]['mes'], 0);
+            chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(chat[chat.length - 1]['mes'], 0);
         }
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id);
@@ -5143,7 +5127,7 @@ async function saveReply(type, getMessage, fromStreaming, title, swipes) {
         chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
         chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
         if (power_user.message_token_count_enabled) {
-            chat[chat.length - 1]['extra']['token_count'] = getTokenCount(chat[chat.length - 1]['mes'], 0);
+            chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(chat[chat.length - 1]['mes'], 0);
         }
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id);
@@ -5168,7 +5152,7 @@ async function saveReply(type, getMessage, fromStreaming, title, swipes) {
         chat[chat.length - 1]['gen_finished'] = generationFinished;
 
         if (power_user.message_token_count_enabled) {
-            chat[chat.length - 1]['extra']['token_count'] = getTokenCount(chat[chat.length - 1]['mes'], 0);
+            chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(chat[chat.length - 1]['mes'], 0);
         }
 
         if (selected_group) {
@@ -5302,7 +5286,7 @@ export function deactivateSendButtons() {
 
 function resetChatState() {
     //unsets expected chid before reloading (related to getCharacters/printCharacters from using old arrays)
-    this_chid = 'invalid-safety-id';
+    this_chid = undefined;
     // replaces deleted charcter name with system user since it will be displayed next.
     name2 = systemUserName;
     // sets up system user to tell user about having deleted a character
@@ -5874,10 +5858,11 @@ function changeMainAPI() {
 
     if (main_api == 'koboldhorde') {
         getStatusHorde();
-        getHordeModels();
+        getHordeModels(true);
     }
 
     setupChatCompletionPromptManager(oai_settings);
+    forceCharacterEditorTokenize();
 }
 
 ////////////////////////////////////////////////////
@@ -5975,7 +5960,7 @@ function getUserAvatarBlock(name) {
     const personaName = power_user.personas[name];
     const personaDescription = power_user.persona_descriptions[name]?.description;
     template.find('.ch_name').text(personaName || '[Unnamed Persona]');
-    template.find('.ch_description').text(personaDescription || '[No description]').toggleClass('text_muted', !personaDescription);
+    template.find('.ch_description').text(personaDescription || $('#user_avatar_block').attr('no_desc_text')).toggleClass('text_muted', !personaDescription);
     template.attr('imgfile', name);
     template.find('.avatar').attr('imgfile', name).attr('title', name);
     template.toggleClass('default_persona', name === power_user.default_persona);
@@ -6100,7 +6085,7 @@ async function doOnboarding(avatarId) {
     template.find('input[name="enable_simple_mode"]').on('input', function () {
         simpleUiMode = $(this).is(':checked');
     });
-    var userName = await callPopup(template, 'input', name1);
+    let userName = await callPopup(template, 'input', currentUser?.name || name1);
 
     if (userName) {
         userName = userName.replace('\n', ' ');
@@ -6153,6 +6138,8 @@ async function getSettings() {
             name1 = settings.username;
             $('#your_name').val(name1);
         }
+
+        await setUserControls(data.enable_accounts);
 
         // Allow subscribers to mutate settings
         eventSource.emit(event_types.SETTINGS_LOADED_BEFORE, settings);
@@ -6371,14 +6358,20 @@ async function saveSettings(type) {
     });
 }
 
-export function setGenerationParamsFromPreset(preset) {
+export function setGenerationParamsFromPreset(preset, isMancerChange = null) {
     const needsUnlock = (preset.max_length ?? max_context) > MAX_CONTEXT_DEFAULT || (preset.genamt ?? amount_gen) > MAX_RESPONSE_DEFAULT;
     $('#max_context_unlocked').prop('checked', needsUnlock).trigger('change');
 
     if (preset.genamt !== undefined) {
         amount_gen = preset.genamt;
-        $('#amount_gen').val(amount_gen);
-        $('#amount_gen_counter').val(amount_gen);
+        if (isMancerChange) {
+            $('#amount_gen').attr('max', amount_gen);
+            $('#amount_gen_counter').val($('#amount_gen').val());
+        }
+        else {
+            $('#amount_gen').val(amount_gen);
+            $('#amount_gen_counter').val(amount_gen);
+        }
     }
 
     if (preset.max_length !== undefined) {
@@ -7104,10 +7097,10 @@ function onScenarioOverrideRemoveClick() {
  * @param {string} type
  * @param {string} inputValue - Value to set the input to.
  * @param {PopupOptions} options - Options for the popup.
- * @typedef {{okButton?: string, rows?: number, wide?: boolean, large?: boolean, allowHorizontalScrolling?: boolean, allowVerticalScrolling?: boolean }} PopupOptions - Options for the popup.
+ * @typedef {{okButton?: string, rows?: number, wide?: boolean, large?: boolean, allowHorizontalScrolling?: boolean, allowVerticalScrolling?: boolean, cropAspect?: number }} PopupOptions - Options for the popup.
  * @returns
  */
-function callPopup(text, type, inputValue = '', { okButton, rows, wide, large, allowHorizontalScrolling, allowVerticalScrolling } = {}) {
+function callPopup(text, type, inputValue = '', { okButton, rows, wide, large, allowHorizontalScrolling, allowVerticalScrolling, cropAspect } = {}) {
     dialogueCloseStop = true;
     if (type) {
         popup_type = type;
@@ -7164,7 +7157,7 @@ function callPopup(text, type, inputValue = '', { okButton, rows, wide, large, a
         crop_data = undefined;
 
         $('#avatarToCrop').cropper({
-            aspectRatio: 2 / 3,
+            aspectRatio: cropAspect ?? 2 / 3,
             autoCropArea: 1,
             viewMode: 2,
             rotatable: false,
@@ -7374,47 +7367,6 @@ export function cancelTtsPlay() {
     if ('speechSynthesis' in window) {
         speechSynthesis.cancel();
     }
-}
-
-async function deleteMessageImage() {
-    const value = await callPopup('<h3>Delete image from message?<br>This action can\'t be undone.</h3>', 'confirm');
-
-    if (!value) {
-        return;
-    }
-
-    const mesBlock = $(this).closest('.mes');
-    const mesId = mesBlock.attr('mesid');
-    const message = chat[mesId];
-    delete message.extra.image;
-    delete message.extra.inline_image;
-    mesBlock.find('.mes_img_container').removeClass('img_extra');
-    mesBlock.find('.mes_img').attr('src', '');
-    await saveChatConditional();
-}
-
-function enlargeMessageImage() {
-    const mesBlock = $(this).closest('.mes');
-    const mesId = mesBlock.attr('mesid');
-    const message = chat[mesId];
-    const imgSrc = message?.extra?.image;
-    const title = message?.extra?.title;
-
-    if (!imgSrc) {
-        return;
-    }
-
-    const img = document.createElement('img');
-    img.classList.add('img_enlarged');
-    img.src = imgSrc;
-    const imgContainer = $('<div><pre><code></code></pre></div>');
-    imgContainer.prepend(img);
-    imgContainer.addClass('img_enlarged_container');
-    imgContainer.find('code').addClass('txt').text(title);
-    const titleEmpty = !title || title.trim().length === 0;
-    imgContainer.find('pre').toggle(!titleEmpty);
-    addCopyToCodeBlocks(imgContainer);
-    callPopup(imgContainer, 'text', '', { wide: true, large: true });
 }
 
 function updateAlternateGreetingsHintVisibility(root) {
@@ -7685,7 +7637,7 @@ async function createOrEditCharacter(e) {
 
                     $('#create_button').attr('value', '✅');
                     let oldSelectedChar = null;
-                    if (this_chid != undefined && this_chid != 'invalid-safety-id') {
+                    if (this_chid !== undefined) {
                         oldSelectedChar = characters[this_chid].avatar;
                     }
 
@@ -7807,8 +7759,14 @@ window['SillyTavern'].getContext = function () {
          */
         registerHelper: () => { },
         registedDebugFunction: registerDebugFunction,
+        /**
+         * @deprecated Use renderExtensionTemplateAsync instead.
+         */
         renderExtensionTemplate: renderExtensionTemplate,
+        renderExtensionTemplateAsync: renderExtensionTemplateAsync,
+        registerDataBankScraper: ScraperManager.registerDataBankScraper,
         callPopup: callPopup,
+        callGenericPopup: callGenericPopup,
         mainApi: main_api,
         extensionSettings: extension_settings,
         ModuleWorkerWrapper: ModuleWorkerWrapper,
@@ -7880,7 +7838,7 @@ function swipe_left() {      // when we swipe left..but no generation.
             duration: swipe_duration,
             easing: animation_easing,
             queue: false,
-            complete: function () {
+            complete: async function () {
                 const is_animation_scroll = ($('#chat').scrollTop() >= ($('#chat').prop('scrollHeight') - $('#chat').outerHeight()) - 10);
                 //console.log('on left swipe click calling addOneMessage');
                 addOneMessage(chat[chat.length - 1], { type: 'swipe' });
@@ -7891,7 +7849,7 @@ function swipe_left() {      // when we swipe left..but no generation.
                     }
 
                     const swipeMessage = $('#chat').find(`[mesid="${chat.length - 1}"]`);
-                    const tokenCount = getTokenCount(chat[chat.length - 1].mes, 0);
+                    const tokenCount = await getTokenCountAsync(chat[chat.length - 1].mes, 0);
                     chat[chat.length - 1]['extra']['token_count'] = tokenCount;
                     swipeMessage.find('.tokenCounterDisplay').text(`${tokenCount}t`);
                 }
@@ -8056,7 +8014,7 @@ const swipe_right = () => {
             duration: swipe_duration,
             easing: animation_easing,
             queue: false,
-            complete: function () {
+            complete: async function () {
                 /*if (!selected_group) {
                     var typingIndicator = $("#typing_indicator_template .typing_indicator").clone();
                     typingIndicator.find(".typing_indicator_name").text(characters[this_chid].name);
@@ -8082,7 +8040,7 @@ const swipe_right = () => {
                             chat[chat.length - 1].extra = {};
                         }
 
-                        const tokenCount = getTokenCount(chat[chat.length - 1].mes, 0);
+                        const tokenCount = await getTokenCountAsync(chat[chat.length - 1].mes, 0);
                         chat[chat.length - 1]['extra']['token_count'] = tokenCount;
                         swipeMessage.find('.tokenCounterDisplay').text(`${tokenCount}t`);
                     }
@@ -8431,7 +8389,7 @@ async function importCharacter(file, preserveFileName = false) {
         $('#character_search_bar').val('').trigger('input');
 
         let oldSelectedChar = null;
-        if (this_chid != undefined && this_chid != 'invalid-safety-id') {
+        if (this_chid !== undefined) {
             oldSelectedChar = characters[this_chid].avatar;
         }
 
@@ -8562,7 +8520,7 @@ export async function handleDeleteCharacter(popup_type, this_chid, delete_chats)
 export async function deleteCharacter(name, avatar, reloadCharacters = true) {
     await clearChat();
     $('#character_cross').click();
-    this_chid = 'invalid-safety-id';
+    this_chid = undefined;
     characters.length = 0;
     name2 = systemUserName;
     chat = [...safetychat];
@@ -8592,7 +8550,7 @@ function addDebugFunctions() {
                 message.extra = {};
             }
 
-            message.extra.token_count = getTokenCount(message.mes, 0);
+            message.extra.token_count = await getTokenCountAsync(message.mes, 0);
         }
 
         await saveChatConditional();
@@ -10166,6 +10124,7 @@ jQuery(async function () {
             '#character_cross',
             '#avatar-and-name-block',
             '#shadow_popup',
+            '.shadow_popup',
             '#world_popup',
             '.ui-widget',
             '.text_pole',
@@ -10240,7 +10199,9 @@ jQuery(async function () {
         const avatarSrc = isDataURL(thumbURL) ? thumbURL : charsPath + targetAvatarImg;
         if ($(`.zoomed_avatar[forChar="${charname}"]`).length) {
             console.debug('removing container as it already existed');
-            $(`.zoomed_avatar[forChar="${charname}"]`).remove();
+            $(`.zoomed_avatar[forChar="${charname}"]`).fadeOut(animation_duration, () => {
+                $(`.zoomed_avatar[forChar="${charname}"]`).remove();
+            });
         } else {
             console.debug('making new container from template');
             const template = $('#zoomed_avatar_template').html();
@@ -10251,18 +10212,43 @@ jQuery(async function () {
             newElement.find('.drag-grabber').attr('id', `zoomFor_${charname}header`);
 
             $('body').append(newElement);
-            if (messageElement.attr('is_user') == 'true') { //handle user avatars
-                $(`.zoomed_avatar[forChar="${charname}"] img`).attr('src', thumbURL);
-            } else if (messageElement.attr('is_system') == 'true' && !isValidCharacter) { //handle system avatars
-                $(`.zoomed_avatar[forChar="${charname}"] img`).attr('src', thumbURL);
+            newElement.fadeIn(animation_duration);
+            const zoomedAvatarImgElement = $(`.zoomed_avatar[forChar="${charname}"] img`);
+            if (messageElement.attr('is_user') == 'true' || (messageElement.attr('is_system') == 'true' && !isValidCharacter)) { //handle user and system avatars
+                zoomedAvatarImgElement.attr('src', thumbURL);
+                zoomedAvatarImgElement.attr('data-izoomify-url', thumbURL);
             } else if (messageElement.attr('is_user') == 'false') { //handle char avatars
-                $(`.zoomed_avatar[forChar="${charname}"] img`).attr('src', avatarSrc);
+                zoomedAvatarImgElement.attr('src', avatarSrc);
+                zoomedAvatarImgElement.attr('data-izoomify-url', avatarSrc);
             }
             loadMovingUIState();
-            $(`.zoomed_avatar[forChar="${charname}"]`).css('display', 'block');
+            $(`.zoomed_avatar[forChar="${charname}"]`).css('display', 'flex');
             dragElement(newElement);
 
-            $(`.zoomed_avatar[forChar="${charname}"] img`).on('dragstart', (e) => {
+            if (power_user.zoomed_avatar_magnification) {
+                $('.zoomed_avatar_container').izoomify();
+            } else {
+                $(`.zoomed_avatar[forChar="${charname}"] .dragClose`).hide();
+            }
+
+            $('.zoomed_avatar').on('mouseup', (e) => {
+                if (e.target.closest('.drag-grabber') || e.button !== 0) {
+                    return;
+                }
+                $(`.zoomed_avatar[forChar="${charname}"]`).fadeOut(animation_duration, () => {
+                    $(`.zoomed_avatar[forChar="${charname}"]`).remove();
+                });
+            });
+
+            $('.zoomed_avatar, .zoomed_avatar .dragClose').on('click touchend', (e) => {
+                if (e.target.closest('.dragClose')) {
+                    $(`.zoomed_avatar[forChar="${charname}"]`).fadeOut(animation_duration, () => {
+                        $(`.zoomed_avatar[forChar="${charname}"]`).remove();
+                    });
+                }
+            });
+
+            zoomedAvatarImgElement.on('dragstart', (e) => {
                 console.log('saw drag on avatar!');
                 e.preventDefault();
                 return false;
@@ -10373,9 +10359,6 @@ jQuery(async function () {
         }
         $('#char-management-dropdown').prop('selectedIndex', 0);
     });
-
-    $(document).on('click', '.mes_img_enlarge', enlargeMessageImage);
-    $(document).on('click', '.mes_img_delete', deleteMessageImage);
 
     $(window).on('beforeunload', () => {
         cancelTtsPlay();

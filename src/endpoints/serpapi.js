@@ -5,10 +5,10 @@ const { jsonParser } = require('../express-common');
 
 const router = express.Router();
 
-// Cosplay as Firefox
+// Cosplay as Chrome
 const visitHeaders = {
     'Accept': 'text/html',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.5',
     'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
@@ -24,7 +24,7 @@ const visitHeaders = {
 
 router.post('/search', jsonParser, async (request, response) => {
     try {
-        const key = readSecret(SECRET_KEYS.SERPAPI);
+        const key = readSecret(request.user.directories, SECRET_KEYS.SERPAPI);
 
         if (!key) {
             console.log('No SerpApi key found');
